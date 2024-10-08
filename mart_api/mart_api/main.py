@@ -2,7 +2,8 @@ from fastapi import FastAPI # type: ignore
 import uvicorn # type: ignore
 from jose import jwt, JWTError # type: ignore
 from datetime import datetime, timedelta # type: ignore
-from fastapi.security import OAuth2PasswordRequestForm # type: ignore
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer # type: ignore
+from fastapi import HTTPException # type: ignore
 from fastapi import Depends # type: ignore
 from typing import Annotated # type: ignore
 
@@ -12,12 +13,22 @@ SECRET_KEY = "A Secure Secret Key"
 
 app = FastAPI()
 
-users = [
-  {"name": "Alice", "age": 25, "email": "alice@example.com"},
-  {"name": "Bob", "age": 30, "email": "bob@example.com"},
-  {"name": "Charlie", "age": 22, "email": "charlie@example.com"},
-  {"name": "Diana", "age": 28, "email": "diana@example.com"}
-]
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+fake_users_db: dict[str, dict[str, str]] = {
+  "ahmad": {
+    "username": "ahmad",
+    "full_name": "Ahmad Ali",
+    "email": "ahmad@example.com",
+    "password": "ahmadsecret",
+  },
+  "mjunaid": {
+    "username": "mjunaid",
+    "full_name": "Muhammad Junaid",
+    "email": "mjunaid@example.com",
+    "password": "mjunaidsecret",
+  },
+}
 
 
 
@@ -32,11 +43,21 @@ def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends(OAuth2Password
   # If they are valid we will return the access token
   # If they are invalid we will return the error message
 
+  user_in_fake_db = fake_users_db.get(form_data.username)
+  if user_in_fake_db is None:
+    raise HTTPException(status_code=400, detail="Incorrect username")
+
+  if user_in_fake_db["password"] != form_data.password:
+    raise HTTPException(status_code=400, detail="Incorrect password")
+
   access_token_expires = timedelta(minutes=1)
-  generated_token = create_access_token(subject=form_data.username, expires_delta=access_token_expires)
+  # generated_token = create_access_token(subject=form_data.username, expires_delta=access_token_expires)
+  access_token = create_access_token(subject=user_in_fake_db["username"], expires_delta=access_token_expires)
 
   # return {"username": form_data.username, "password": form_data.password}
-  return {"username": form_data.username, "access_token": generated_token}
+  # return {"username": form_data.username, "access_token": generated_token}
+  return {"access_token": access_token, "token_type": "bearer", "expires_in": access_token_expires.total_seconds() }
+
 
 @app.get("/")
 def root():
@@ -47,8 +68,14 @@ def root():
 
 
 @app.get("/users/")
-def read_users():
-  return users
+def read_users(token: Annotated[str, Depends(oauth2_scheme)]):
+  return fake_users_db
+
+@app.get("/users/me")
+def read_users_me(token: Annotated[str, Depends(oauth2_scheme)]):
+  user_token_data = decode_access_token(token)
+  user_in_db = fake_users_db.get(user_token_data["sub"])
+  return user_in_db
 
 
 def create_access_token(subject: str , expires_delta: timedelta) -> str:
