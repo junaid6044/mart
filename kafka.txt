@@ -1,0 +1,10 @@
+https://github.com/panaverse/learn-generative-ai/tree/main/05_microservices_all_in_one_platform/15_event_driven/00_eda_challenge
+
+	
+
+docker network create -d bridge kafka-net
+docker network ls
+
+
+docker run -p 9092:9092 --network kafka-net --name kafka-con apache/kafka:3.7.0
+docker run -it -p 8080:8080 --network kafka-net -e DYNAMIC_CONFIG_ENABLED=true provectuslabs/kafka-ui
