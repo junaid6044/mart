@@ -1,77 +1,117 @@
-# main.py
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import OAuth2PasswordRequestForm
-from jose import jwt, JWTError # type: ignore
-from datetime import datetime, timedelta
-from typing import Optional, AsyncGenerator, Union, Annotated
-from sqlmodel import Field, Session, SQLModel, create_engine, select, Sequence
-from app import settings, kafka, db, model # type: ignore
-from aiokafka import AIOKafkaProducer, AIOKafkaConsumer # type: ignore
-import asyncio
-from contextlib import asynccontextmanager
-import json
-
-
-# only needed for psycopg 3 - replace postgresql
-# with postgresql+psycopg in settings.DATABASE_URL
-connection_string = str(settings.DATABASE_URL).replace(
-    "postgresql", "postgresql+psycopg"
-)
-engine = create_engine(connection_string)
-
-# Database model for user information
-class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(index=True)  # Add username field for authentication
-    password: str = Field(index=True)  # Add password field for authentication
+from fastapi import FastAPI,Depends,HTTPException  # type: ignore
+from contextlib import asynccontextmanager  # type: ignore
+import logging  # type: ignore
+import asyncio  # type: ignore
+from sqlmodel import Session,select  # type: ignore
+from typing import Annotated  # type: ignore
+from aiokafka import AIOKafkaProducer  # type: ignore
+from datetime import datetime, timedelta  # type: ignore
+from fastapi.security import OAuth2PasswordRequestForm  # type: ignore
+from app.schema import User,token,RegisterUser,update_user
+from app.db import create_table, get_session
+from app.crud import register_user,auth_user,verify_password,user_patch_update
+from app.kafka import produce_message,consume_messages
+from app.auth import current_user
+from app.auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 
 @asynccontextmanager
-async def lifespan(app: FastAPI)-> AsyncGenerator[None, None]:
-    print("Creating tables..")
-    # loop.run_until_complete(consume_messages('todos', 'broker:19092'))
-    task = asyncio.create_task(kafka.consume_messages('todos', 'broker:19092'))
-    db.create_db_and_tables()
-    yield
-
-# Initialize FastAPI app and create database tables
-app = FastAPI(lifespan=lifespan, title="Hello World API with DB", 
-    version="0.0.1",
-    servers=[
-        {
-            "url": "http://127.0.0.1:8000", # ADD NGROK URL Here Before Creating GPT Action
-            "description": "Development Server"
-        }
-    ])
-
-
-@app.post("/signup", response_model=User)
-async def create_user(user: User, session: Annotated[Session, Depends(db.get_session)], producer: Annotated[AIOKafkaProducer, Depends(kafka.get_kafka_producer)]):
-    # user.password = hash_password(user.password)  # Hash the password before saving
-    user_info = {field: getattr(user, field) for field in user.dict()}
-    user_json = json.dumps(user_info).encode("utf-8")
-    await producer.send_and_wait("todos", user_json)
-    # session.add(user)
-    # session.commit()
-    # session.refresh(user)
-    return {"message": "User saved successfully", "user": user}
-
-
-# Login endpoint to authenticate users
-@app.post("/login")
-def login(user: Annotated[OAuth2PasswordRequestForm, Depends()]):
-    with Session(engine) as session:
-        # Fetch user from database
-        statement = select(User).where(User.username == user.username)
-        user_in_db = session.exec(statement).first()
+async def lifespan(app: FastAPI):
+	print("lifspan event is started")
+	task = asyncio.create_task(consume_messages('userService', 'broker:19092'))
+	create_table()
+	yield
     
-    if not user_in_db or user.password != user_in_db.password:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    
+app = FastAPI(lifespan=lifespan,
+               title="FastAPI User Service",
+               description="This is a FastAPI Service",
+               version="1.0.0"
+)
 
-    token = model.create_access_token(subject=user.username)
-    return {"username": user.username, "access_token": token}
+@app.get("/")
+async def root():
+	return {"message": "Welcome to the User Services API!"}
+
+@app.post("/register")
+async def register(user:RegisterUser,
+                   session:Annotated[Session,Depends(get_session)],
+                   producer:Annotated[AIOKafkaProducer,Depends(produce_message)]):
+	new_user = await register_user(user=user,session=session,producer=producer)
+	return new_user
+
+@app.post("/token", response_model=token)
+async def login(form_data:Annotated[OAuth2PasswordRequestForm, Depends()],
+                session:Annotated[Session,Depends(get_session)]):
+	user = await auth_user(form_data.username,form_data.password,session)
+	if not user:
+		raise HTTPException(
+			status_code=404,
+			detail="Incorrect username or password")
+	access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+	access_token = create_access_token(data={"sub": form_data.username}, expires_delta=access_token_expires)
+	return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get('/user')
+async def get_user(session: Annotated[Session, Depends(get_session)],
+									 current_user: Annotated[User, Depends(current_user)]):
+
+	statement = select(User).where(User.id == current_user.id)
+	statement1 = session.exec(statement).all()
+	return statement1
 
 
-@app.get("/users/", response_model=list[User])
-def read_users(session: Annotated[Session, Depends(db.get_session)]):
-    users = session.exec(select(User)).all()
-    return users
+@app.get('/user/{id}')
+async def get_user_data_by_id(id: int,
+															session: Annotated[Session, Depends(get_session)],
+															current_user: Annotated[User, Depends(current_user)]):
+    
+	if id != current_user.id:
+		raise HTTPException(status_code=403, detail="You are not authorized to access this data")
+
+	user_record = select(User).where(User.id == id)
+	user = session.exec(user_record).first()
+
+	if user is None:
+		raise HTTPException(status_code=404, detail="User not found")
+	
+	return user
+
+
+@app.patch('/user/{id},{password}',response_model=User)
+async def updated_user(
+	id: int,edit_user:update_user, password:str, 
+	session: Annotated[Session, Depends(get_session)],
+	current_user: Annotated[User, Depends(current_user)]):
+
+	if id != current_user.id:
+		raise HTTPException(status_code=403, detail="You are not authorized to access this data")
+
+	match_user =select(User).where(User.id == id)
+	user_record = session.exec(match_user).first()
+	if user_record is None:
+		raise HTTPException(status_code=404, detail="User not found")
+	if not verify_password(password,user_record.password):
+		raise HTTPException(status_code=403, detail="Yout password is incorrect please provide the correct password")
+	user_record1 = await user_patch_update(user_record,edit_user)
+	session.add(user_record1)
+	session.commit()
+	session.refresh(user_record1)
+	return user_record1
+
+@app.delete('/user/{id}')
+async def delete_user(id:int,password:str, 
+	session: Annotated[Session, Depends(get_session)],
+	current_user: Annotated[User, Depends(current_user)]):
+		
+	if id != current_user.id:
+		raise HTTPException(status_code=403, detail="You are not authorized to access this data")
+	
+	match_user =select(User).where(User.id == id)
+	user_record = session.exec(match_user).first()
+	if user_record is None:
+		raise HTTPException(status_code=404, detail="User not found")
+	if not verify_password(password,user_record.password):
+		raise HTTPException(status_code=403, detail="You password is incorrect please provide the correct password")
+	session.delete(user_record)
+	session.commit()
+	return {"message":"User deleted successfully"}
