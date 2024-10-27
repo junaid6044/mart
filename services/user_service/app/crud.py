@@ -47,7 +47,7 @@ async def register_user(user:RegisterUser , session: Annotated[Session, Depends(
   if existing_user:
     raise HTTPException(status_code=400, detail="User already exists")
   new_user = User(userName=user.user_name, email=user.email, password=get_password_hash(user.password))
-  user_data =Newuser(userName=new_user.userName, email=new_user.email)
+  user_data = Newuser(userName=new_user.userName, email=new_user.email)
   serialized_user = user_data.SerializeToString()
   await producer.send_and_wait('userService', serialized_user)
   session.add(new_user)

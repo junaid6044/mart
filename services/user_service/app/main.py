@@ -13,13 +13,37 @@ from app.crud import register_user,auth_user,verify_password,user_patch_update
 from app.kafka import produce_message,consume_messages
 from app.auth import current_user
 from app.auth import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
+from app.kafka import register_schema
+import app.user_pb2 as user_pb2
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 	print("lifspan event is started")
+	
+	# Define schema to register on startup
+	user_schema = """
+	syntax = "proto3";
+	message NewUser {
+		string userName = 1;
+		string email = 2;
+	}
+	"""
+	schema_name = "NewUser"
+
+	# Register the schema
+	print("Registering schema with Schema Registry...")
+	register_schema(schema_name, user_schema)
+	
+	
+	# Start background task for consuming messages
+	print("Starting message consumer task...")
 	task = asyncio.create_task(consume_messages('userService', 'broker:19092'))
+	
+	# Ensure tables are created in the database
+	print("Creating database tables...")
 	create_table()
-	yield
+
+	yield  # The application runs during this period
     
     
 app = FastAPI(lifespan=lifespan,

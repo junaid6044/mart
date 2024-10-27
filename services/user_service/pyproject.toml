@@ -32,6 +32,8 @@ aiokafka = "^0.10.0"
 psycopg2-binary = "^2.9.10"
 psycopg2 = "^2.9.10"
 protobuf = "^5.28.2"
+confluent-kafka = "^2.6.0"
+requests = "^2.32.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"
